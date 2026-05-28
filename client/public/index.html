@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
+<meta name="theme-color" content="#0a0e1a"/>
+<meta name="description" content="ImpostorDraw — Jogo multiplayer de desenho e dedução social"/>
+<title>ImpostorDraw</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@400;700;900&family=Rajdhani:wght@500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/css/main.css"/>
+<script>window.MAX_STROKE_LENGTH = 200;</script>
+</head>
+<body>
+
+<canvas id="particle-bg"></canvas>
+<div id="toast-wrap"></div>
+
+<!-- ════════════════════════════════════════════════════════════════
+     SCREEN 1 — AUTH / LOBBY
+═════════════════════════════════════════════════════════════════ -->
+<div class="screen" id="screen-auth">
+  <div class="auth-card">
+
+    <!-- User bar (visível após login) -->
+    <div class="user-bar hidden" id="user-info-bar">
+      <span>Olá, <b id="display-username"></b></span>
+      <button class="btn btn-ghost btn-sm" id="btn-logout">Sair</button>
+    </div>
+
+    <!-- Logo -->
+    <div class="logo">
+      <h1>Impostor<span>Draw</span></h1>
+      <small>Desenha · Engana · Sobrevive</small>
+    </div>
+
+    <!-- Avatar -->
+    <div class="av-wrap">
+      <div class="av-ring" id="av-ring" title="Clica para trocar">
+        <canvas id="av-canvas" width="88" height="88"></canvas>
+      </div>
+      <div class="av-hint">↻ Clica para trocar avatar</div>
+      <div class="av-actions">
+        <button class="btn btn-secondary btn-sm" id="btn-upload-avatar">📷 Foto</button>
+        <input type="file" id="avatar-file-input" accept="image/*" class="hidden"/>
+      </div>
+    </div>
+
+    <!-- Username -->
+    <div style="margin-bottom:14px">
+      <label class="field-label">Nome do Jogador</label>
+      <input type="text" id="inp-username" class="field-input" placeholder="Ex: NickDraw21" maxlength="15" autocomplete="off"/>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tab-group">
+      <button class="tab-btn active" data-tab="quick">⚡ Quick Play</button>
+      <button class="tab-btn" data-tab="private">🔒 Sala Privada</button>
+    </div>
+
+    <!-- Tab: Quick Play -->
+    <div class="tab-panel" id="panel-quick">
+      <button class="btn btn-primary" id="btn-quick-play">🎮 Procurar Partida</button>
+    </div>
+
+    <!-- Tab: Private -->
+    <div class="tab-panel hidden" id="panel-private">
+      <button class="btn btn-primary" id="btn-create-room">✨ Criar Sala Privada</button>
+      <div class="divider">ou entra com código</div>
+      <div class="code-row" style="margin-bottom:12px">
+        <input type="text" id="inp-join-code" class="field-input" placeholder="CÓDIGO" maxlength="6"/>
+        <button class="btn btn-primary" id="btn-join-room">Entrar</button>
+      </div>
+    </div>
+
+    <div class="divider">Conta</div>
+    <div class="row2">
+      <button class="btn btn-secondary" id="btn-open-login">🔑 Login</button>
+      <button class="btn btn-secondary" id="btn-open-register">📝 Registar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════
+     SCREEN 2 — MATCHMAKING
+═════════════════════════════════════════════════════════════════ -->
+<div class="screen hidden" id="screen-matchmaking">
+  <div class="mm-wrap">
+    <div class="radar">
+      <div class="pulse"></div>
+      <div class="pulse r2"></div>
+      <div class="radar-core">🔍</div>
+    </div>
+
+    <h2 class="mm-title">Procurando Partida…</h2>
+    <p class="mm-sub" id="mm-status">A alocar perfil no servidor…</p>
+
+    <div class="mm-panel">
+      <div class="mm-row">
+        <span class="mm-lbl">Jogadores</span>
+        <span class="mm-badge" id="mm-counter">1 / 8</span>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" id="mm-bar" style="width:12.5%"></div>
+      </div>
+      <div class="mm-players-list" id="mm-players-list"></div>
+    </div>
+
+    <!-- Sala privada info -->
+    <div class="mm-private-box hidden" id="mm-private-box">
+      <div class="mm-lbl" style="margin-bottom:4px">Código da Sala — partilha com amigos:</div>
+      <span class="mm-code" id="mm-code-display" onclick="App.showToast && navigator.clipboard?.writeText(document.getElementById('mm-code-display').textContent)">——</span>
+      <button class="btn btn-secondary btn-sm" id="btn-copy-code">📋 Copiar Código</button>
+      <div style="margin-top:10px">
+        <button class="btn btn-primary" id="btn-start-game" disabled style="margin-bottom:0">Aguardando (mín. 3)…</button>
+      </div>
+    </div>
+
+    <button class="btn btn-ghost" id="btn-cancel-mm">✕ Cancelar</button>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════
+     SCREEN 3 — ROLE REVEAL
+═════════════════════════════════════════════════════════════════ -->
+<div class="screen hidden" id="screen-role">
+  <div class="role-card">
+    <span class="role-emoji" id="role-emoji">🎨</span>
+    <div class="role-name innocent" id="role-name">INOCENTE</div>
+    <p class="role-desc" id="role-desc">Desenha o teu tema. Descobre quem tem o traço suspeito!</p>
+    <div class="theme-box">
+      <div class="theme-cat" id="theme-category">Animais</div>
+      <div class="theme-word" id="theme-word">Elefante</div>
+    </div>
+    <button class="btn btn-primary" id="btn-enter-game" style="margin-bottom:0">Entrar no Jogo →</button>
+  </div>
+  <p style="font-size:.7rem;color:var(--muted);text-align:center;max-width:280px;margin-top:4px">
+    🤫 Mantém o teu papel em segredo até à votação!
+  </p>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════
+     SCREEN 4 — GAMEPLAY
+═════════════════════════════════════════════════════════════════ -->
+<div class="screen hidden" id="screen-game" style="display:grid">
+
+  <!-- Top bar -->
+  <div class="game-topbar">
+    <div class="topbar-logo">Impostor<span>Draw</span></div>
+    <div class="chip" id="round-badge">Rodada 1/6</div>
+    <div class="topbar-theme">
+      <small id="topbar-category">Categoria</small>
+      <b id="topbar-word">?????</b>
+    </div>
+    <div class="topbar-room" id="topbar-room" onclick="App && App.showToast && navigator.clipboard?.writeText(document.getElementById('topbar-room').textContent)" title="Copiar código">——</div>
+  </div>
+
+  <!-- Sidebar jogadores -->
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-title">Jogadores</div>
+  </div>
+
+  <!-- Canvas central -->
+  <div class="canvas-area">
+    <div class="canvas-wrap" id="canvas-wrap">
+      <canvas id="game-canvas"></canvas>
+
+      <!-- Voting Overlay -->
+      <div id="voting-overlay" class="hidden">
+        <div class="vote-title">🚨 Hora de Votar!</div>
+        <p class="vote-sub">Quem fez o traço suspeito? Vota antes do tempo acabar!</p>
+        <div class="vote-btns" id="vote-btns"></div>
+        <div class="vote-meta">
+          <span id="vote-count">0/0 votaram</span>
+          <span id="vote-timer">⏱ 25s</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stroke meter -->
+    <div class="stroke-meter">
+      <span class="s-label">Traço:</span>
+      <div class="s-track"><div class="s-fill" id="stroke-fill"></div></div>
+      <span id="stroke-pct">0%</span>
+    </div>
+  </div>
+
+  <!-- Draw toolbar -->
+  <div class="draw-toolbar">
+    <div id="color-swatches" style="display:flex;gap:5px;flex-wrap:wrap"></div>
+    <div class="t-sep"></div>
+    <div id="size-btns" style="display:flex;gap:5px"></div>
+    <div class="t-sep"></div>
+    <button class="tool-btn eraser" id="btn-eraser">⌫ Borracha</button>
+    <button class="tool-btn" id="btn-undo" title="Desfazer">↩ Undo</button>
+    <button class="tool-btn" id="btn-clear" style="border-color:var(--rose);color:var(--rose)">🗑 Limpar</button>
+    <div class="turn-badge">
+      <div class="turn-dot" id="turn-dot" style="background:var(--muted)"></div>
+      <span id="turn-txt" style="color:var(--muted2)">Aguarda…</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════
+     SCREEN 5 — RESULTS
+═════════════════════════════════════════════════════════════════ -->
+<div class="screen hidden" id="screen-results">
+  <div class="results-card">
+    <div style="font-size:3rem;margin-bottom:8px" id="result-emoji">🏆</div>
+    <div class="result-winner innocent" id="result-winner">Inocentes Venceram!</div>
+    <div class="result-sub" id="result-sub">O impostor foi descoberto!</div>
+
+    <div class="reveal-grid" id="reveal-grid"></div>
+
+    <div class="leaderboard">
+      <div class="lb-title">🏅 Classificação Final</div>
+      <div id="lb-rows"></div>
+    </div>
+
+    <button class="btn btn-primary" id="btn-play-again">🔄 Jogar Novamente</button>
+    <button class="btn btn-ghost" id="btn-back-lobby" style="margin-top:4px">← Lobby</button>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════
+     MODAL — REGISTER
+═════════════════════════════════════════════════════════════════ -->
+<div class="modal-overlay hidden" id="modal-register">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span class="modal-title">Criar Conta</span>
+      <button class="modal-close" data-modal="modal-register">✕</button>
+    </div>
+    <div class="modal-field">
+      <label class="field-label">Username</label>
+      <input type="text" id="reg-username" class="field-input" placeholder="NickDraw21" maxlength="15"/>
+    </div>
+    <div class="modal-field">
+      <label class="field-label">E-mail</label>
+      <input type="email" id="reg-email" class="field-input" placeholder="email@exemplo.com"/>
+    </div>
+    <div class="modal-field">
+      <label class="field-label">Senha</label>
+      <input type="password" id="reg-password" class="field-input" placeholder="mínimo 6 caracteres"/>
+    </div>
+    <button class="btn btn-primary" id="btn-do-register" style="margin-top:4px">Criar Conta</button>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════
+     MODAL — LOGIN
+═════════════════════════════════════════════════════════════════ -->
+<div class="modal-overlay hidden" id="modal-login">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span class="modal-title">Entrar</span>
+      <button class="modal-close" data-modal="modal-login">✕</button>
+    </div>
+    <div class="modal-field">
+      <label class="field-label">E-mail</label>
+      <input type="email" id="login-email" class="field-input" placeholder="email@exemplo.com"/>
+    </div>
+    <div class="modal-field">
+      <label class="field-label">Senha</label>
+      <input type="password" id="login-password" class="field-input" placeholder="a tua senha"/>
+    </div>
+    <button class="btn btn-primary" id="btn-do-login" style="margin-top:4px">Entrar</button>
+  </div>
+</div>
+
+<!-- Scripts -->
+<script src="/socket.io/socket.io.js"></script>
+<script src="/js/auth.js"></script>
+<script src="/js/canvas.js"></script>
+<script src="/js/socket-client.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>
