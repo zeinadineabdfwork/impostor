@@ -1,5 +1,16 @@
 // src/server.js — Bootstrap da aplicação (HTTP + WebSocket)
 require('dotenv').config();
+
+// Validação rápida de variáveis de ambiente críticas — falha cedo com mensagem útil
+(() => {
+  const required = ['JWT_SECRET', 'JWT_REFRESH_SECRET', 'DATABASE_URL'];
+  const missing = required.filter((k) => !process.env[k]);
+  if (missing.length) {
+    console.error(`Missing required env vars: ${missing.join(', ')}.`);
+    console.error('Copy .env.example to .env and fill the values (never commit .env).');
+    process.exit(1);
+  }
+})();
 const express    = require('express');
 const http       = require('http');
 const { Server } = require('socket.io');

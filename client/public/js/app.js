@@ -296,15 +296,25 @@ const App = (() => {
   // ═══════════════════════════════════════════════════════════════════════════
   // MATCHMAKING ANIMATION
   // ═══════════════════════════════════════════════════════════════════════════
+  const MATCHMAKING_TARGET = 3;
   let mmInterval = null;
+
+  function setMatchmakingProgress(count) {
+    const counter = document.getElementById('mm-counter');
+    const bar     = document.getElementById('mm-bar');
+    const value   = Math.min(count, MATCHMAKING_TARGET);
+    if (counter) counter.textContent = `${value} / ${MATCHMAKING_TARGET}`;
+    if (bar)     bar.style.width     = `${(value/MATCHMAKING_TARGET)*100}%`;
+  }
+
   function startMMAnimation() {
-    let fake = 1;
+    const fake = 0;
+    setMatchmakingProgress(fake);
     const counter = document.getElementById('mm-counter');
     const bar     = document.getElementById('mm-bar');
     mmInterval = setInterval(() => {
-      if (fake < 8) fake++;
-      if (counter) counter.textContent = `${fake} / 8`;
-      if (bar)     bar.style.width     = `${(fake/8)*100}%`;
+      if (counter) counter.textContent = `Procurando...`;
+      if (bar)     bar.style.width = `100%`;
     }, 1800);
   }
   function clearMMAnimation() { clearInterval(mmInterval); }
@@ -318,25 +328,30 @@ const App = (() => {
   function onRoomCreated({ roomCode, room }) {
     state.roomCode = roomCode;
     state.players  = room.players;
+    state.isPrivate = room.isPrivate;
     clearMMAnimation();
     document.getElementById('mm-code-display').textContent = roomCode;
     document.getElementById('mm-private-box')?.classList.remove('hidden');
     renderMMPlayers(room.players);
+    setMatchmakingProgress(room.players.length);
     updateStartBtn(room.players);
   }
 
   function onRoomJoined({ roomCode, room }) {
     state.roomCode = roomCode;
     state.players  = room.players;
+    state.isPrivate = room.isPrivate;
     clearMMAnimation();
     document.getElementById('mm-code-display').textContent = roomCode;
     renderMMPlayers(room.players);
+    setMatchmakingProgress(room.players.length);
     updateStartBtn(room.players);
   }
 
   function onPlayerJoined({ players }) {
     state.players = players;
     renderMMPlayers(players);
+    setMatchmakingProgress(players.length);
     updateStartBtn(players);
     showToast(`${players[players.length-1]?.username} entrou!`,'info');
   }
@@ -344,6 +359,7 @@ const App = (() => {
   function onPlayerLeft({ players }) {
     state.players = players;
     renderMMPlayers(players);
+    setMatchmakingProgress(players.length);
     updateStartBtn(players);
   }
 
@@ -508,6 +524,15 @@ const App = (() => {
   function updateStartBtn(players) {
     const btn = document.getElementById('btn-start-game');
     if (!btn) return;
+
+    if (state.isPrivate === false) {
+      btn.disabled = true;
+      btn.textContent = `Aguardando ${players.length}/3 jogadores...`;
+      btn.classList.remove('btn-primary');
+      btn.classList.add('btn-disabled');
+      return;
+    }
+
     const ok = players.length >= 3;
     btn.disabled = !ok;
     btn.textContent = ok ? `▶ Iniciar (${players.length} jogadores)` : `Aguardando (mín. 3)…`;

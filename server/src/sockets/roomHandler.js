@@ -56,6 +56,7 @@ module.exports = function registerRoomHandler(io, socket, activeRooms, socketRoo
   // ─── Quick Matchmaking (Battle Royal) ─────────────────────────────────────
   socket.on('room:quickmatch', ({ userId, username, avatarUrl }) => {
     const name = sanitizeUsername(username);
+    console.log(`[Matchmaking] quickmatch request from ${socket.id} | userId=${userId} username=${name}`);
     if (!name) return socket.emit('error', { message: 'Nome inválido.' });
 
     // Procurar sala pública com vagas
@@ -76,6 +77,7 @@ module.exports = function registerRoomHandler(io, socket, activeRooms, socketRoo
       io.to(targetRoom.roomId).emit('room:player-joined', { players: sanitizePlayers(targetRoom.players) });
       socket.emit('room:joined', { roomCode: targetRoom.roomId, room: sanitizeRoomForClient(targetRoom) });
       console.log(`[Matchmaking] ${name} joined existing room ${targetRoom.roomId}`);
+      maybeAutoStartPublicRoom(io, targetRoom);
     } else {
       // Criar nova sala pública
       const roomCode = generateRoomCode(6);
@@ -101,6 +103,7 @@ module.exports = function registerRoomHandler(io, socket, activeRooms, socketRoo
     }
     if (room.status !== 'LOBBY') return socket.emit('error', { message: 'Jogo já em curso.' });
 
+    console.log(`[Room] Starting game in ${roomCode} by host ${socket.userId}`);
     startGame(io, room);
   });
 
@@ -192,7 +195,15 @@ function sanitizeRoomForClient(room) {
   };
 }
 
-function startGame(io, room) {
+function maybeAutoStartPublicRoom(io, room) {
+    if (!room || room.isPrivate || room.status !== 'LOBBY') return;
+    if (room.players.length < MIN_PLAYERS) return;
+
+    console.log(`[Matchmaking] Room ${room.roomId} reached ${MIN_PLAYERS} players and will auto-start.`);
+    startGame(io, room);
+  }
+
+  function startGame(io, room) {
   const theme = pickTheme();
   const impIdx = pickImpostorIndex(room.players.length);
 
