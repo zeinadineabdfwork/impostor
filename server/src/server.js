@@ -1,7 +1,7 @@
-// src/server.js — Bootstrap da aplicação (HTTP + WebSocket)
-require('dotenv').config();
 const dns = require('dns');
-dns.setDefaultResultOrder('ipv4first');
+dns.setDefaultResultOrder('ipv4first');// src/server.js — Bootstrap da aplicação (HTTP + WebSocket)
+require('dotenv').config();
+
 
 // ─── Validação rápida de variáveis de ambiente críticas ──────────────────────
 (() => {

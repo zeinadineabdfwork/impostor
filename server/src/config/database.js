@@ -10,6 +10,8 @@ if (!process.env.DATABASE_URL) {
 
 const isProduction = process.env.NODE_ENV === 'production';
 
+// Forçar IPv4 — o Render tenta IPv6 por padrão mas o Supabase não responde em IPv6
+
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
