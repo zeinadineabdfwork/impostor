@@ -10,17 +10,7 @@ if (!process.env.DATABASE_URL) {
 
 const isProduction = process.env.NODE_ENV === 'production';
 
-// Forçar IPv4 — o Render tenta IPv6 por padrão mas o Supabase não responde em IPv6
-const dns = require('dns');
-dns.setDefaultResultOrder('ipv4first');
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // sempre SSL para Supabase
-  max: 10,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
-});
 
 pool.on('connect', () => {
   console.log('[DB] Nova conexão estabelecida com o pool PostgreSQL.');
