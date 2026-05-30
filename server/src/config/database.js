@@ -10,14 +10,16 @@ if (!process.env.DATABASE_URL) {
 
 const isProduction = process.env.NODE_ENV === 'production';
 
+// Forçar IPv4 — o Render tenta IPv6 por padrão mas o Supabase não responde em IPv6
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: isProduction
-    ? { rejectUnauthorized: false }
-    : (process.env.DATABASE_URL.includes('supabase.com') ? { rejectUnauthorized: false } : false),
+  ssl: { rejectUnauthorized: false }, // sempre SSL para Supabase
   max: 10,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 8000,
+  connectionTimeoutMillis: 10000,
 });
 
 pool.on('connect', () => {
