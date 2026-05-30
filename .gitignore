@@ -1,8 +1,6 @@
 node_modules/
 .env
 *.log
-dist/
 .DS_Store
-public/assets/avatars/uploads/*.webp
-public/assets/avatars/uploads/*.jpg
-public/assets/avatars/uploads/*.png
+dist/
+server/public/assets/avatars/uploads/
