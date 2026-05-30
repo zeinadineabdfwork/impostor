@@ -11,6 +11,13 @@ if (!process.env.DATABASE_URL) {
 const isProduction = process.env.NODE_ENV === 'production';
 
 
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }, // sempre SSL para Supabase
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+});
 
 pool.on('connect', () => {
   console.log('[DB] Nova conexão estabelecida com o pool PostgreSQL.');
