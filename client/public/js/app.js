@@ -226,18 +226,18 @@ const App = (() => {
     return { username, userId, avatarUrl };
   }
 
-  function ensureConnected() {
+  async function ensureConnected() {
     if (!state.token) {
       // Login anónimo automático
       const { username } = getSessionData();
-      return Auth.guestLogin(username).then(d => {
-        state.user  = d.user;
-        state.token = d.accessToken;
-        SocketClient.connect(state.token);
-      });
+      const d = await Auth.guestLogin(username);
+      state.user  = d.user;
+      state.token = d.accessToken;
+      console.log('[App] Guest login OK, userId:', state.user.id);
     }
-    if (!SocketClient.isConnected()) SocketClient.connect(state.token);
-    return Promise.resolve();
+    // Aguarda a conexão efectiva antes de continuar
+    await SocketClient.connect(state.token);
+    console.log('[App] Socket pronto, id:', SocketClient.getId());
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

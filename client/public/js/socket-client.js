@@ -6,18 +6,42 @@ const SocketClient = (() => {
   let socket = null;
 
   function connect(token) {
-    if (socket?.connected) return socket;
-    socket = io(window.location.origin, {
-      auth: { token },
-      transports: ['websocket', 'polling'],
-      reconnectionAttempts: 5,
-      reconnectionDelay: 2000,
-    });
+    // Se já conectado, retorna Promise resolvida imediatamente
+    if (socket?.connected) return Promise.resolve(socket);
 
-    socket.on('connect', () => {
-      console.log('[Socket] Connected:', socket.id);
-      App.onConnected();
-    });
+    // Se já existe socket a ligar, aguarda o evento connect
+    if (socket && !socket.connected) {
+      return new Promise((resolve, reject) => {
+        socket.once('connect', () => resolve(socket));
+        socket.once('connect_error', (err) => reject(err));
+      });
+    }
+
+    // Nova ligação — retorna Promise que resolve quando conectado
+    return new Promise((resolve, reject) => {
+      socket = io(window.location.origin, {
+        auth: { token },
+        transports: ['websocket', 'polling'],
+        reconnectionAttempts: 5,
+        reconnectionDelay: 2000,
+      });
+
+      socket.once('connect', () => {
+        console.log('[Socket] Connected:', socket.id);
+        App.onConnected();
+        resolve(socket);
+      });
+
+      socket.once('connect_error', (err) => {
+        console.error('[Socket] Connection error:', err.message);
+        reject(err);
+      });
+
+      // Manter listeners permanentes para eventos subsequentes
+      socket.on('connect', () => {
+        console.log('[Socket] Re-connected:', socket.id);
+        App.onConnected();
+      });
     socket.on('disconnect', (reason) => {
       console.warn('[Socket] Disconnected:', reason);
       App.onDisconnected(reason);
