@@ -1,25 +1,68 @@
 // src/sockets/roomHandler.js
 // Orquestração de salas: criar, entrar, matchmaking e desconexão
+
 const {
-  generateRoomCode, createRoomObject, pickTheme, pickImpostorIndex,
+  generateRoomCode, generateMatchmakingCode,
+  createRoomObject, pickTheme, pickImpostorIndex,
   MIN_PLAYERS, MAX_PLAYERS, MAX_ROUNDS,
 } = require('../utils/gameLogic');
 const { sanitizeUsername, sanitizeRoomCode } = require('../utils/sanitize');
 
+// ── Pool de matchmaking público ───────────────────────────────────────────────
+// Cada entrada: { code, createdAt }
+// Quando tem MIN_PLAYERS utilizadores nessa sala → jogo começa automaticamente
+let _currentPublicCode = null;
+let _currentPublicCreatedAt = null;
+const PUBLIC_CODE_TTL = 90 * 1000; // 90 segundos — depois gera novo código
+
+function getOrCreatePublicCode() {
+  const now = Date.now();
+  // Se não há código ou expirou, criar novo
+  if (!_currentPublicCode || (now - _currentPublicCreatedAt) > PUBLIC_CODE_TTL) {
+    _currentPublicCode = generateMatchmakingCode();
+    _currentPublicCreatedAt = now;
+    console.log(`[Matchmaking] Novo código público gerado: ${_currentPublicCode}`);
+  }
+  return _currentPublicCode;
+}
+
+function resetPublicCode() {
+  _currentPublicCode = null;
+  _currentPublicCreatedAt = null;
+}
+
 /**
  * @param {import('socket.io').Server} io
  * @param {import('socket.io').Socket} socket
- * @param {Object} activeRooms  — dicionário partilhado em memória
+ * @param {Object} activeRooms   — dicionário partilhado em memória
  * @param {Object} socketRoomMap — { socketId → roomCode }
  */
 module.exports = function registerRoomHandler(io, socket, activeRooms, socketRoomMap) {
 
-  // ─── Criar sala privada ────────────────────────────────────────────────────
-  socket.on('room:create', ({ userId, username, avatarUrl }) => {
+  // ─── Criar sala privada com código escolhido pelo utilizador ──────────────
+  socket.on('room:create', ({ userId, username, avatarUrl, customCode }) => {
     const cleanName = sanitizeUsername(username);
     if (!cleanName) return socket.emit('error', { message: 'Nome inválido.' });
 
-    const roomCode = generateRoomCode(6);
+    let roomCode;
+
+    if (customCode) {
+      // Validar código personalizado: 4-12 caracteres alfanuméricos
+      const cleaned = customCode.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+      if (cleaned.length < 4) {
+        return socket.emit('error', { message: 'Código deve ter pelo menos 4 caracteres.' });
+      }
+      if (activeRooms[cleaned]) {
+        return socket.emit('error', { message: 'Este código já está em uso. Escolhe outro.' });
+      }
+      roomCode = cleaned;
+      console.log(`[Room] Criando sala privada com código personalizado: ${roomCode} por ${cleanName}`);
+    } else {
+      // Código aleatório se não foi fornecido
+      roomCode = generateRoomCode(6);
+      console.log(`[Room] Criando sala privada com código aleatório: ${roomCode} por ${cleanName}`);
+    }
+
     activeRooms[roomCode] = createRoomObject({
       roomCode, isPrivate: true,
       hostSocketId: socket.id, hostUserId: userId,
@@ -29,18 +72,18 @@ module.exports = function registerRoomHandler(io, socket, activeRooms, socketRoo
     socket.join(roomCode);
     socketRoomMap[socket.id] = roomCode;
     socket.emit('room:created', { roomCode, room: sanitizeRoomForClient(activeRooms[roomCode]) });
-    console.log(`[Room] Created private room ${roomCode} by ${cleanName}`);
+    console.log(`[Room] Sala privada ${roomCode} criada por ${cleanName}`);
   });
 
-  // ─── Entrar numa sala privada ──────────────────────────────────────────────
+  // ─── Entrar numa sala privada pelo código ──────────────────────────────────
   socket.on('room:join', ({ roomCode, userId, username, avatarUrl }) => {
-    const code  = sanitizeRoomCode(roomCode);
-    const name  = sanitizeUsername(username);
+    const code = sanitizeRoomCode(roomCode);
+    const name = sanitizeUsername(username);
     if (!code || !name) return socket.emit('error', { message: 'Dados inválidos.' });
 
     const room = activeRooms[code];
-    if (!room)             return socket.emit('error', { message: 'Sala não encontrada.' });
-    if (room.status !== 'LOBBY') return socket.emit('error', { message: 'Jogo já em curso.' });
+    if (!room)                    return socket.emit('error', { message: 'Sala não encontrada. Verifica o código.' });
+    if (room.status !== 'LOBBY')  return socket.emit('error', { message: 'Jogo já em curso nesta sala.' });
     if (room.players.length >= MAX_PLAYERS) return socket.emit('error', { message: 'Sala cheia.' });
 
     const player = buildPlayer(socket.id, userId, name, avatarUrl);
@@ -50,50 +93,79 @@ module.exports = function registerRoomHandler(io, socket, activeRooms, socketRoo
 
     io.to(code).emit('room:player-joined', { players: sanitizePlayers(room.players) });
     socket.emit('room:joined', { roomCode: code, room: sanitizeRoomForClient(room) });
-    console.log(`[Room] ${name} joined private room ${code}`);
+    console.log(`[Room] ${name} entrou na sala privada ${code} (${room.players.length}/${MAX_PLAYERS})`);
   });
 
-  // ─── Quick Matchmaking (Battle Royal) ─────────────────────────────────────
+  // ─── Quick Matchmaking ─────────────────────────────────────────────────────
+  // Lógica:
+  //  1. Gera (ou reutiliza) um código público partilhado
+  //  2. Envia esse código ao utilizador para ele "ver" que está a entrar
+  //  3. Coloca-o na sala com esse código
+  //  4. Quando MIN_PLAYERS chegarem → jogo começa automaticamente
+  //  5. Depois do jogo começar, o próximo quickplay gera um código novo
   socket.on('room:quickmatch', ({ userId, username, avatarUrl }) => {
     const name = sanitizeUsername(username);
-    console.log(`[Matchmaking] quickmatch request from ${socket.id} | userId=${userId} username=${name}`);
     if (!name) return socket.emit('error', { message: 'Nome inválido.' });
 
-    // Procurar sala pública com vagas
-    let targetRoom = null;
-    for (const code in activeRooms) {
-      const r = activeRooms[code];
-      if (!r.isPrivate && r.status === 'LOBBY' && r.players.length < MAX_PLAYERS) {
-        targetRoom = r;
-        break;
-      }
-    }
+    const publicCode = getOrCreatePublicCode();
+    console.log(`[Matchmaking] ${name} (${socket.id}) a entrar no código público: ${publicCode}`);
 
-    if (targetRoom) {
-      const player = buildPlayer(socket.id, userId, name, avatarUrl);
-      targetRoom.players.push(player);
-      socket.join(targetRoom.roomId);
-      socketRoomMap[socket.id] = targetRoom.roomId;
-      io.to(targetRoom.roomId).emit('room:player-joined', { players: sanitizePlayers(targetRoom.players) });
-      socket.emit('room:joined', { roomCode: targetRoom.roomId, room: sanitizeRoomForClient(targetRoom) });
-      console.log(`[Matchmaking] ${name} joined existing room ${targetRoom.roomId}`);
-      maybeAutoStartPublicRoom(io, targetRoom);
-    } else {
-      // Criar nova sala pública
-      const roomCode = generateRoomCode(6);
-      activeRooms[roomCode] = createRoomObject({
-        roomCode, isPrivate: false,
+    // Sala ainda não existe → criar
+    if (!activeRooms[publicCode]) {
+      activeRooms[publicCode] = createRoomObject({
+        roomCode: publicCode, isPrivate: false,
         hostSocketId: socket.id, hostUserId: userId,
         hostUsername: name, hostAvatarUrl: avatarUrl || null,
       });
-      socket.join(roomCode);
-      socketRoomMap[socket.id] = roomCode;
-      socket.emit('room:created', { roomCode, room: sanitizeRoomForClient(activeRooms[roomCode]) });
-      console.log(`[Matchmaking] ${name} created new public room ${roomCode}`);
+      socket.join(publicCode);
+      socketRoomMap[socket.id] = publicCode;
+      socket.emit('room:joined', { roomCode: publicCode, room: sanitizeRoomForClient(activeRooms[publicCode]) });
+      console.log(`[Matchmaking] Sala ${publicCode} criada. Jogadores: 1/${MIN_PLAYERS}`);
+    } else {
+      // Sala existe → entrar
+      const room = activeRooms[publicCode];
+
+      if (room.status !== 'LOBBY') {
+        // Esta sala já começou — forçar novo código e tentar de novo
+        resetPublicCode();
+        const newCode = getOrCreatePublicCode();
+        console.log(`[Matchmaking] Sala ${publicCode} já em jogo. Novo código: ${newCode}`);
+        activeRooms[newCode] = createRoomObject({
+          roomCode: newCode, isPrivate: false,
+          hostSocketId: socket.id, hostUserId: userId,
+          hostUsername: name, hostAvatarUrl: avatarUrl || null,
+        });
+        socket.join(newCode);
+        socketRoomMap[socket.id] = newCode;
+        socket.emit('room:joined', { roomCode: newCode, room: sanitizeRoomForClient(activeRooms[newCode]) });
+        console.log(`[Matchmaking] Sala ${newCode} criada. Jogadores: 1/${MIN_PLAYERS}`);
+        return;
+      }
+
+      if (room.players.length >= MAX_PLAYERS) {
+        resetPublicCode();
+        return socket.emit('error', { message: 'Sala cheia, tenta novamente.' });
+      }
+
+      const player = buildPlayer(socket.id, userId, name, avatarUrl);
+      room.players.push(player);
+      socket.join(publicCode);
+      socketRoomMap[socket.id] = publicCode;
+
+      io.to(publicCode).emit('room:player-joined', { players: sanitizePlayers(room.players) });
+      socket.emit('room:joined', { roomCode: publicCode, room: sanitizeRoomForClient(room) });
+      console.log(`[Matchmaking] ${name} entrou em ${publicCode}. Jogadores: ${room.players.length}/${MIN_PLAYERS}`);
+
+      // Verificar se atingiu o mínimo → iniciar automaticamente
+      if (room.players.length >= MIN_PLAYERS) {
+        console.log(`[Matchmaking] Sala ${publicCode} com ${room.players.length} jogadores → a iniciar jogo!`);
+        resetPublicCode(); // próximo quickplay terá novo código
+        setTimeout(() => startGame(io, room), 1500);
+      }
     }
   });
 
-  // ─── Host inicia a partida ─────────────────────────────────────────────────
+  // ─── Host inicia a partida manualmente (sala privada) ─────────────────────
   socket.on('room:start', ({ roomCode }) => {
     const room = activeRooms[roomCode];
     if (!room) return socket.emit('error', { message: 'Sala não encontrada.' });
@@ -103,7 +175,7 @@ module.exports = function registerRoomHandler(io, socket, activeRooms, socketRoo
     }
     if (room.status !== 'LOBBY') return socket.emit('error', { message: 'Jogo já em curso.' });
 
-    console.log(`[Room] Starting game in ${roomCode} by host ${socket.userId}`);
+    console.log(`[Room] Host ${socket.id} a iniciar jogo em ${roomCode}`);
     startGame(io, room);
   });
 
@@ -112,23 +184,24 @@ module.exports = function registerRoomHandler(io, socket, activeRooms, socketRoo
     const roomCode = socketRoomMap[socket.id];
     if (!roomCode || !activeRooms[roomCode]) return;
 
-    const room  = activeRooms[roomCode];
-    const pIdx  = room.players.findIndex(p => p.socketId === socket.id);
+    const room = activeRooms[roomCode];
+    const pIdx = room.players.findIndex(p => p.socketId === socket.id);
     if (pIdx === -1) return;
 
     room.players[pIdx].connected = false;
     io.to(roomCode).emit('room:player-disconnected', { username: room.players[pIdx].username });
+    console.log(`[Room] ${room.players[pIdx].username} desconectou de ${roomCode}`);
 
-    // Tolerância de 25s antes de remover
     const TOLERANCE = parseInt(process.env.DISCONNECT_TOLERANCE_SECONDS || '25', 10) * 1000;
     setTimeout(() => {
       if (!activeRooms[roomCode]) return;
       if (!activeRooms[roomCode].players[pIdx]?.connected) {
-        activeRooms[roomCode].players.splice(pIdx, 1);
+        const leaving = activeRooms[roomCode].players.splice(pIdx, 1)[0];
         delete socketRoomMap[socket.id];
+        console.log(`[Room] ${leaving?.username} removido de ${roomCode}. Restantes: ${activeRooms[roomCode].players.length}`);
         if (activeRooms[roomCode].players.length === 0) {
           delete activeRooms[roomCode];
-          console.log(`[Room] Empty room ${roomCode} cleaned up.`);
+          console.log(`[Room] Sala ${roomCode} eliminada (vazia).`);
         } else {
           io.to(roomCode).emit('room:player-left', { players: sanitizePlayers(activeRooms[roomCode].players) });
         }
@@ -141,7 +214,7 @@ module.exports = function registerRoomHandler(io, socket, activeRooms, socketRoo
     const code = sanitizeRoomCode(roomCode);
     if (!code || !activeRooms[code]) return socket.emit('error', { message: 'Sala expirou.' });
 
-    const room = activeRooms[code];
+    const room   = activeRooms[code];
     const player = room.players.find(p => p.userId === userId);
     if (!player) return socket.emit('error', { message: 'Jogador não encontrado na sala.' });
 
@@ -150,17 +223,14 @@ module.exports = function registerRoomHandler(io, socket, activeRooms, socketRoo
     socket.join(code);
     socketRoomMap[socket.id] = code;
 
-    // Enviar estado completo para re-sincronização
-    socket.emit('room:state-sync', {
-      room: sanitizeRoomForClient(room),
-      canvasState: room.canvasState,
-    });
+    socket.emit('room:state-sync', { room: sanitizeRoomForClient(room), canvasState: room.canvasState });
     io.to(code).emit('room:player-reconnected', { username: player.username });
-    console.log(`[Room] ${player.username} reconnected to ${code}`);
+    console.log(`[Room] ${player.username} reconectou a ${code}`);
   });
 };
 
-// ─── Helpers internos ────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
 function buildPlayer(socketId, userId, username, avatarUrl) {
   return {
     socketId,
@@ -177,9 +247,9 @@ function buildPlayer(socketId, userId, username, avatarUrl) {
 }
 
 function sanitizePlayers(players) {
-  return players.map(({ socketId, userId, username, avatarUrl, role: _r, score, turnsLeft, connected }) => ({
+  return players.map(({ socketId, userId, username, avatarUrl, score, turnsLeft, connected }) => ({
     socketId, userId, username, avatarUrl, score, turnsLeft, connected,
-    // role NÃO é enviado publicamente — apenas via evento privado ao próprio jogador
+    // role NÃO enviado publicamente — só via evento privado ao próprio jogador
   }));
 }
 
@@ -195,26 +265,17 @@ function sanitizeRoomForClient(room) {
   };
 }
 
-function maybeAutoStartPublicRoom(io, room) {
-    if (!room || room.isPrivate || room.status !== 'LOBBY') return;
-    if (room.players.length < MIN_PLAYERS) return;
+function startGame(io, room) {
+  const theme   = pickTheme();
+  const impIdx  = pickImpostorIndex(room.players.length);
 
-    console.log(`[Matchmaking] Room ${room.roomId} reached ${MIN_PLAYERS} players and will auto-start.`);
-    startGame(io, room);
-  }
-
-  function startGame(io, room) {
-  const theme = pickTheme();
-  const impIdx = pickImpostorIndex(room.players.length);
-
-  room.status       = 'PLAYING';
-  room.currentTheme = theme;
+  room.status        = 'PLAYING';
+  room.currentTheme  = theme;
   room.impostorIndex = impIdx;
   room.currentRound  = 1;
   room.currentTurnIndex = 0;
   room.canvasState   = [];
 
-  // Atribuir papéis
   room.players.forEach((p, i) => {
     p.role      = i === impIdx ? 'impostor' : 'innocent';
     p.turnsLeft = parseInt(process.env.MAX_ROUNDS || '6', 10);
@@ -223,17 +284,13 @@ function maybeAutoStartPublicRoom(io, room) {
     p.score     = 0;
   });
 
-  // Emitir role individual (privado)
   room.players.forEach((p) => {
     const word = p.role === 'impostor' ? theme.impostorWord : theme.word;
     io.to(p.socketId).emit('game:role-assigned', {
-      role: p.role,
-      themeCategory: theme.category,
-      word,
+      role: p.role, themeCategory: theme.category, word,
     });
   });
 
-  // Emitir início de jogo publicamente
   io.to(room.roomId).emit('game:started', {
     players:          sanitizePlayers(room.players),
     currentTurnIndex: room.currentTurnIndex,
@@ -242,9 +299,9 @@ function maybeAutoStartPublicRoom(io, room) {
     themeCategory:    theme.category,
   });
 
-  console.log(`[Game] Started in room ${room.roomId} | impostor: ${room.players[impIdx].username}`);
+  console.log(`[Game] Iniciado em ${room.roomId} | Impostor: ${room.players[impIdx].username} | Tema: ${theme.word}`);
 }
 
-module.exports.startGame          = startGame;
-module.exports.sanitizePlayers    = sanitizePlayers;
+module.exports.startGame             = startGame;
+module.exports.sanitizePlayers       = sanitizePlayers;
 module.exports.sanitizeRoomForClient = sanitizeRoomForClient;

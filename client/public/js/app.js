@@ -120,6 +120,9 @@ const App = (() => {
     document.getElementById('inp-join-code')?.addEventListener('input', e=>{
       e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'');
     });
+    document.getElementById('inp-create-code')?.addEventListener('input', e=>{
+      e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'');
+    });
     document.getElementById('inp-join-code')?.addEventListener('keydown', e=>{
       if(e.key==='Enter') doJoinPrivate();
     });
@@ -247,14 +250,17 @@ const App = (() => {
     SocketClient.emit('room:quickmatch', { userId, username, avatarUrl });
     showScreen('screen-matchmaking');
     document.getElementById('mm-private-box')?.classList.add('hidden');
+    document.getElementById('mm-status')?.textContent && (document.getElementById('mm-status').textContent = 'A encontrar outros jogadores…');
     startMMAnimation();
   }
 
   async function doCreateRoom() {
     const { username, userId, avatarUrl } = getSessionData();
     if (!username || username.length < 2) return showToast('Nome deve ter 2+ letras!','danger');
+    const rawCode = document.getElementById('inp-create-code')?.value.trim().toUpperCase().replace(/[^A-Z0-9]/g,'') || null;
+    if (rawCode && rawCode.length < 4) return showToast('Código deve ter pelo menos 4 caracteres!','danger');
     await ensureConnected();
-    SocketClient.emit('room:create', { userId, username, avatarUrl });
+    SocketClient.emit('room:create', { userId, username, avatarUrl, customCode: rawCode || undefined });
     showScreen('screen-matchmaking');
     startMMAnimation();
   }

@@ -65,10 +65,15 @@
 
     <!-- Tab: Private -->
     <div class="tab-panel hidden" id="panel-private">
-      <button class="btn btn-primary" id="btn-create-room">✨ Criar Sala Privada</button>
-      <div class="divider">ou entra com código</div>
+      <div class="divider" style="margin-top:0">Criar sala com o teu código</div>
+      <div class="code-row" style="margin-bottom:8px">
+        <input type="text" id="inp-create-code" class="field-input" placeholder="ex: AMIGOS123 (opcional)" maxlength="12" style="text-transform:uppercase"/>
+        <button class="btn btn-primary" id="btn-create-room">✨ Criar</button>
+      </div>
+      <p style="font-size:0.72rem;color:var(--muted);margin:0 0 10px;text-align:center">Deixa vazio para código aleatório · 4-12 letras/números</p>
+      <div class="divider">ou entra numa sala existente</div>
       <div class="code-row" style="margin-bottom:12px">
-        <input type="text" id="inp-join-code" class="field-input" placeholder="CÓDIGO" maxlength="6"/>
+        <input type="text" id="inp-join-code" class="field-input" placeholder="CÓDIGO DA SALA" maxlength="12"/>
         <button class="btn btn-primary" id="btn-join-room">Entrar</button>
       </div>
     </div>

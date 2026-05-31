@@ -1,150 +1,128 @@
 // src/utils/gameLogic.js
-// Algoritmos puros do jogo — sem efeitos colaterais de I/O
+// Lógica pura do jogo: geração de salas, temas, scores
 
-const { v4: uuidv4 } = require('uuid');
-
-// ─── Constantes (lidas do .env ou default) ───────────────────────────────────
+const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '3', 10);
+const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '8', 10);
+const MAX_ROUNDS  = parseInt(process.env.MAX_ROUNDS  || '6', 10);
 const MAX_STROKE_LENGTH = parseInt(process.env.MAX_STROKE_LENGTH || '200', 10);
-const MAX_ROUNDS        = parseInt(process.env.MAX_ROUNDS         || '6',   10);
-const MIN_PLAYERS       = parseInt(process.env.MIN_PLAYERS        || '3',   10);
-const MAX_PLAYERS       = parseInt(process.env.MAX_PLAYERS        || '8',   10);
 
-// ─── Banco de temas bilíngue ─────────────────────────────────────────────────
-const THEME_BANK = [
-  { category: 'Animais',    words: ['Elefante','Golfinho','Pinguim','Flamingo','Aranha','Cobra','Leão','Girafa'] },
-  { category: 'Comida',     words: ['Pizza','Sushi','Taco','Croissant','Bolo','Hamburguer','Gelado','Crepe'] },
-  { category: 'Veículos',   words: ['Helicóptero','Submarino','Foguetão','Tractor','Mota','Veleiro','Comboio','Scooter'] },
-  { category: 'Objectos',   words: ['Guitarra','Telescópio','Ampulheta','Bússola','Ímã','Microscópio','Xadrez','Dado'] },
-  { category: 'Lugares',    words: ['Vulcão','Farol','Castelo','Iglu','Pirâmide','Floresta','Caverna','Ilha'] },
-  { category: 'Profissões', words: ['Astronauta','Pirata','Mago','Detetive','Chef','Arqueólogo','Bombeiro','Cirurgião'] },
-  { category: 'Desporto',   words: ['Surf','Esgrima','Polo','Badminton','Curling','Luta de Sumo','Escalada','Canoagem'] },
-];
+// ── Geração de códigos ────────────────────────────────────────────────────────
 
 /**
- * Gera código alfanumérico maiúsculo de N caracteres.
- * @param {number} length
+ * Gera um código aleatório para sala privada.
+ * Ex: "K9F2XM"
  */
-function generateRoomCode(length = 6) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // sem O,0,I,1 (confusão visual)
-  return Array.from({ length }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+function generateRoomCode(len = 6) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < len; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
 }
 
 /**
- * Selecciona tema aleatório e gera palavras distintas para inocentes e impostor.
- * @returns {{ category, word, impostorWord }}
+ * Gera um código de matchmaking público — mais longo para ser único.
+ * Formato: 3 letras + 3 dígitos + 2 letras + 4 dígitos  Ex: "ABC123AB3456"
  */
-function pickTheme() {
-  const theme = THEME_BANK[Math.floor(Math.random() * THEME_BANK.length)];
-  const shuffled = [...theme.words].sort(() => Math.random() - 0.5);
+function generateMatchmakingCode() {
+  const L = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const D = '0123456789';
+  const rL = (n) => Array.from({length:n}, () => L[Math.floor(Math.random()*L.length)]).join('');
+  const rD = (n) => Array.from({length:n}, () => D[Math.floor(Math.random()*D.length)]).join('');
+  return rL(3) + rD(3) + rL(2) + rD(4);
+}
+
+// ── Criação de sala ──────────────────────────────────────────────────────────
+
+function createRoomObject({ roomCode, isPrivate, hostSocketId, hostUserId, hostUsername, hostAvatarUrl }) {
   return {
-    category:     theme.category,
-    word:         shuffled[0],          // palavra dos inocentes
-    impostorWord: shuffled[1],          // palavra diferente para o impostor
+    roomId: roomCode,
+    isPrivate,
+    status: 'LOBBY',
+    players: [{
+      socketId:  hostSocketId,
+      userId:    hostUserId || `guest_${hostSocketId.slice(0,8)}`,
+      username:  hostUsername,
+      avatarUrl: hostAvatarUrl || null,
+      role:      'innocent',
+      turnsLeft: MAX_ROUNDS,
+      score:     0,
+      hasVoted:  false,
+      votedFor:  null,
+      connected: true,
+    }],
+    currentTheme:     null,
+    impostorIndex:    -1,
+    currentRound:     0,
+    currentTurnIndex: 0,
+    canvasState:      [],
+    votesReceived:    {},
+    _turnTimer:       null,
+    _voteTimer:       null,
+    _strokeLength:    0,
+    _lastPoint:       null,
+    createdAt:        Date.now(),
   };
 }
 
-/**
- * Sorteia o índice do impostor aleatoriamente dentro do array de jogadores.
- * @param {number} playerCount
- */
-function pickImpostorIndex(playerCount) {
-  return Math.floor(Math.random() * playerCount);
+// ── Temas ─────────────────────────────────────────────────────────────────────
+
+const THEMES = [
+  { category:'Animais',    word:'Elefante',    impostorWord:'Rinoceronte' },
+  { category:'Animais',    word:'Golfinho',    impostorWord:'Tubarão' },
+  { category:'Animais',    word:'Pinguim',     impostorWord:'Pato' },
+  { category:'Comida',     word:'Pizza',       impostorWord:'Lasanha' },
+  { category:'Comida',     word:'Sushi',       impostorWord:'Onigiri' },
+  { category:'Comida',     word:'Hambúrguer',  impostorWord:'Sanduíche' },
+  { category:'Desporto',   word:'Futebol',     impostorWord:'Rugby' },
+  { category:'Desporto',   word:'Natação',     impostorWord:'Mergulho' },
+  { category:'Tecnologia', word:'Smartphone',  impostorWord:'Tablet' },
+  { category:'Tecnologia', word:'Computador',  impostorWord:'Televisão' },
+  { category:'Lugares',    word:'Praia',       impostorWord:'Piscina' },
+  { category:'Lugares',    word:'Montanha',    impostorWord:'Colina' },
+  { category:'Veículos',   word:'Avião',       impostorWord:'Helicóptero' },
+  { category:'Veículos',   word:'Barco',       impostorWord:'Kayak' },
+  { category:'Profissões', word:'Médico',      impostorWord:'Enfermeiro' },
+  { category:'Profissões', word:'Chef',        impostorWord:'Padeiro' },
+];
+
+function pickTheme() {
+  return THEMES[Math.floor(Math.random() * THEMES.length)];
 }
 
-/**
- * Calcula distância euclidiana entre dois pontos (Pitágoras).
- * Usado no cliente e re-verificado no servidor.
- * @param {{ x:number, y:number }} p1
- * @param {{ x:number, y:number }} p2
- */
-function euclideanDistance(p1, p2) {
-  return Math.hypot(p2.x - p1.x, p2.y - p1.y);
+function pickImpostorIndex(numPlayers) {
+  return Math.floor(Math.random() * numPlayers);
 }
 
-/**
- * Verifica se o comprimento acumulado de um traço ultrapassou o limite.
- * @param {number} accumulatedLength
- */
-function isStrokeOverLimit(accumulatedLength) {
-  return accumulatedLength >= MAX_STROKE_LENGTH;
-}
+// ── Cálculo de scores ─────────────────────────────────────────────────────────
 
-/**
- * Tabela de pontuação.
- */
-const SCORE_TABLE = {
-  IMPOSTOR_SURVIVES:    300, // impostor sobrevive ao jogo completo
-  VOTER_CATCHES_IMP:    150, // inocente que vota certo
-  IMPOSTOR_CAUGHT_LOSE:  0,  // impostor perde
-  WRONG_VOTE_PENALTY:  -30,  // quem vota errado
-  EARLY_VOTE_BONUS:     50,  // descoberto antes da última rodada
-};
+function calculateScores(players, impostorSocketId, impostorCaught, roundsSurvived) {
+  return players.map(p => {
+    let totalScore = p.score || 0;
+    const isImpostor = p.id === impostorSocketId || p.socketId === impostorSocketId;
 
-/**
- * Calcula pontuações finais.
- * @param {Array}  players       — lista de jogadores com { id, role, votedFor, hasVoted }
- * @param {string} impostorId    — ID do jogador impostor
- * @param {boolean} impostorCaught
- * @param {number} roundCaught   — rodada em que foi descoberto (0 = não foi)
- */
-function calculateScores(players, impostorId, impostorCaught, roundCaught = 0) {
-  return players.map((p) => {
-    let delta = 0;
-    if (p.id === impostorId) {
-      delta = impostorCaught ? SCORE_TABLE.IMPOSTOR_CAUGHT_LOSE : SCORE_TABLE.IMPOSTOR_SURVIVES;
+    if (isImpostor) {
+      if (!impostorCaught) totalScore += 500 + roundsSurvived * 50;
     } else {
-      if (p.votedFor === impostorId) {
-        delta = SCORE_TABLE.VOTER_CATCHES_IMP;
-        if (roundCaught > 0 && roundCaught < MAX_ROUNDS) delta += SCORE_TABLE.EARLY_VOTE_BONUS;
-      } else if (p.hasVoted) {
-        delta = SCORE_TABLE.WRONG_VOTE_PENALTY;
-      }
+      if (impostorCaught) totalScore += 300;
+      if (p.votedFor === impostorSocketId) totalScore += 100;
     }
-    return { ...p, scoreDelta: delta, totalScore: (p.score || 0) + delta };
+    return { ...p, totalScore };
   });
 }
 
-/**
- * Cria o objeto de sala inicial para activeRooms.
- */
-function createRoomObject({ roomCode, isPrivate, hostSocketId, hostUserId, hostUsername, hostAvatarUrl }) {
-  return {
-    roomId:           roomCode,
-    isPrivate,
-    status:           'LOBBY',        // LOBBY | PLAYING | VOTING | FINISHED
-    currentRound:     1,
-    currentTurnIndex: 0,
-    currentTheme:     null,
-    impostorIndex:    -1,
-    players: [{
-      socketId:   hostSocketId,
-      userId:     hostUserId,
-      username:   hostUsername,
-      avatarUrl:  hostAvatarUrl,
-      role:       'innocent',
-      turnsLeft:  MAX_ROUNDS,
-      score:      0,
-      hasVoted:   false,
-      votedFor:   null,
-      connected:  true,
-    }],
-    canvasState:    [],  // buffer de traços para re-sincronização
-    votesReceived:  {},  // { socketId: voteCount }
-    createdAt:      Date.now(),
-  };
+// ── Anti-cheat ─────────────────────────────────────────────────────────────────
+
+function euclideanDistance(a, b) {
+  return Math.sqrt(Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2));
+}
+
+function isStrokeOverLimit(len) {
+  return len > MAX_STROKE_LENGTH;
 }
 
 module.exports = {
-  generateRoomCode,
-  pickTheme,
-  pickImpostorIndex,
-  euclideanDistance,
-  isStrokeOverLimit,
-  calculateScores,
-  createRoomObject,
-  MAX_STROKE_LENGTH,
-  MAX_ROUNDS,
-  MIN_PLAYERS,
-  MAX_PLAYERS,
-  SCORE_TABLE,
+  MIN_PLAYERS, MAX_PLAYERS, MAX_ROUNDS, MAX_STROKE_LENGTH,
+  generateRoomCode, generateMatchmakingCode,
+  createRoomObject, pickTheme, pickImpostorIndex,
+  calculateScores, euclideanDistance, isStrokeOverLimit,
 };
