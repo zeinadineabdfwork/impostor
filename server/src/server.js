@@ -1,7 +1,8 @@
-const dns = require('dns');
-dns.setDefaultResultOrder('ipv4first');// src/server.js — Bootstrap da aplicação (HTTP + WebSocket)
-require('dotenv').config();
+// src/server.js — Bootstrap da aplicação (HTTP + WebSocket)
+// DEVE ser a primeira linha — força IPv4 antes de qualquer módulo de rede
+require('dns').setDefaultResultOrder('ipv4first');
 
+require('dotenv').config();
 
 // ─── Validação rápida de variáveis de ambiente críticas ──────────────────────
 (() => {
@@ -95,13 +96,13 @@ app.use('/api/users', userRoutes);
 
 // ─── Health Check (Render keep-alive + diagnóstico) ──────────────────────────
 app.get('/health', async (req, res) => {
-  const { pool } = require('./config/database');
+  const { supabaseAdmin } = require('./config/supabaseClient');
   let dbStatus = 'unknown';
   let dbLatencyMs = null;
 
   try {
     const t0 = Date.now();
-    await pool.query('SELECT 1');
+    const { error: _hErr } = await supabaseAdmin.from('users').select('count', { count: 'exact', head: true }); if (_hErr) throw new Error(_hErr.message);
     dbLatencyMs = Date.now() - t0;
     dbStatus = 'ok';
   } catch (err) {
