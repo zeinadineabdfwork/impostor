@@ -95,20 +95,38 @@ module.exports = function registerGameHandler(io, socket, activeRooms, socketRoo
     endTurn(io, socket, room, roomCode);
   });
 
-  // ─── Relay de voz (apenas durante VOTING) ─────────────────────────────────
-  socket.on('voice:chunk', ({ chunk }) => {
+  // ─── Relay WebRTC para voz P2P (apenas durante VOTING) ───────────────────
+  // O servidor só retransmite sinais de negociação — o áudio vai P2P entre browsers.
+
+  socket.on('voice:signal', ({ toSocketId, signal }) => {
     const roomCode = socketRoomMap[socket.id];
     if (!roomCode || !activeRooms[roomCode]) return;
     const room = activeRooms[roomCode];
-    if (room.status !== 'VOTING') return; // só relay durante votação
+    if (room.status !== 'VOTING') return;
 
+    const sender = room.players.find(p => p.socketId === socket.id);
+    if (!sender) return;
+
+    // Relay directo para o destinatário
+    io.to(toSocketId).emit('voice:signal', {
+      fromSocketId: socket.id,
+      username:     sender.username,
+      signal,
+    });
+  });
+
+  // Notificar sala quando alguém inicia/termina de falar
+  socket.on('voice:speaking', ({ speaking }) => {
+    const roomCode = socketRoomMap[socket.id];
+    if (!roomCode || !activeRooms[roomCode]) return;
+    const room = activeRooms[roomCode];
+    if (room.status !== 'VOTING') return;
     const player = room.players.find(p => p.socketId === socket.id);
     if (!player) return;
-
-    // Re-transmitir para todos os outros na sala (sem o próprio)
-    socket.to(roomCode).emit('voice:chunk', {
-      chunk,
+    socket.to(roomCode).emit('voice:speaking', {
+      socketId: socket.id,
       username: player.username,
+      speaking,
     });
   });
 

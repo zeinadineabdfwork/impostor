@@ -415,6 +415,7 @@ const App = (() => {
   function onVotingStarted({ players, timeoutSeconds }) {
     state.players = players;
     state.phase   = 'voting';
+    window._App_state = state; // expor para Voice module
     Canvas.setMyTurn(false);
     buildVoteOverlay(players, timeoutSeconds || 40);
     document.getElementById('voting-overlay').classList.remove('hidden');
@@ -755,176 +756,275 @@ const App = (() => {
   };
 })();
 
-window.addEventListener('DOMContentLoaded', () => App.init());
+window.addEventListener('DOMContentLoaded', () => {
+  App.init();
+  // Expor state para o Voice module aceder aos players activos
+  // Actualizado em cada onVotingStarted
+});
+// Referência global ao state — usada pelo Voice module
+window._App_state = null; // preenchido em onVotingStarted
 
 // ═══════════════════════════════════════════════════════════════════════════
-// VOICE MODULE — Conversa por voz durante a votação
-// Usa WebRTC via Simple Peer emulado com getUserMedia + Socket.io relay
-// Abordagem: áudio capturado → chunks MediaRecorder → relay via socket
+// VOICE MODULE — WebRTC P2P
+// Áudio vai directamente entre browsers (sem passar pelo servidor).
+// O servidor só retransmite os sinais de negociação (offer/answer/ICE).
 // ═══════════════════════════════════════════════════════════════════════════
 const Voice = (() => {
-  let localStream    = null;
-  let audioContext   = null;
-  let mediaRecorder  = null;
-  let isSpeaking     = false;
-  let isActive       = false;
+  let localStream  = null;
+  let peers        = {};   // { socketId: RTCPeerConnection }
+  let isActive     = false;
+  let isSpeaking   = false;
 
-  // Elementos UI
-  const getBtn     = () => document.getElementById('btn-mic');
-  const getStatus  = () => document.getElementById('voice-status');
+  // STUN público gratuito — necessário para atravessar NAT/firewall
+  const RTC_CONFIG = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ],
+  };
+
+  const getBtn          = () => document.getElementById('btn-mic');
+  const getStatus       = () => document.getElementById('voice-status');
   const getSpeakingList = () => document.getElementById('speaking-list');
 
+  // ── Iniciar fase de voz ───────────────────────────────────────────────────
   async function start() {
     if (isActive) return;
     isActive = true;
+    peers    = {};
 
-    // Limpar lista de quem fala
     const sl = getSpeakingList();
     if (sl) sl.innerHTML = '';
 
-    const btn = getBtn();
-    if (btn) {
-      btn.addEventListener('pointerdown',  onMicDown);
-      btn.addEventListener('pointerup',    onMicUp);
-      btn.addEventListener('pointerleave', onMicUp);
-      btn.addEventListener('touchstart',   onMicDown, { passive: true });
-      btn.addEventListener('touchend',     onMicUp);
-    }
-
-    // Pedir permissão de microfone
+    // Pedir microfone
     try {
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      const st = getStatus();
-      if (st) st.textContent = '🎙 Microfone pronto';
+      localStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 },
+        video: false,
+      });
       console.log('[Voice] Microfone obtido.');
+      const st = getStatus();
+      if (st) st.textContent = '🎙 Pronto';
     } catch (err) {
-      console.warn('[Voice] Sem permissão de microfone:', err.message);
+      console.warn('[Voice] Sem microfone:', err.message);
       const st = getStatus();
       if (st) st.textContent = '🚫 Sem microfone';
+      const btn = getBtn();
       if (btn) btn.disabled = true;
+      isActive = false;
+      return;
     }
 
-    // Ouvir áudio dos outros jogadores
-    SocketClient.onVoiceChunk((data) => {
-      if (!isActive) return;
-      playAudioChunk(data.chunk, data.username);
-      showSpeaking(data.username);
+    // Push-to-talk — segurar para falar
+    const btn = getBtn();
+    if (btn) {
+      btn.disabled = false;
+      btn.addEventListener('pointerdown',  _onMicDown);
+      btn.addEventListener('pointerup',    _onMicUp);
+      btn.addEventListener('pointerleave', _onMicUp);
+      btn.addEventListener('touchstart',   _onMicDown, { passive: false });
+      btn.addEventListener('touchend',     _onMicUp);
+    }
+
+    // Ouvir sinais WebRTC vindos dos outros jogadores
+    SocketClient.onVoiceSignal(_onRemoteSignal);
+
+    // Ouvir notificações de quem está a falar
+    SocketClient.onVoiceSpeaking(({ username, speaking }) => {
+      if (speaking) _showSpeaking(username);
     });
+
+    // Criar conexões com todos os jogadores activos na sala
+    // (só o "iniciador" cria offer — evitar duplicados)
+    const myId = SocketClient.getId();
+    const activePlayers = (window._App_state?.players || []).filter(p =>
+      !p.eliminated && p.socketId !== myId
+    );
+    for (const p of activePlayers) {
+      // Iniciar como "polite peer" — só cria offer se o meu socketId for menor lexicograficamente
+      if (myId < p.socketId) {
+        await _createPeer(p.socketId, true);
+      }
+    }
   }
 
+  // ── Parar tudo ────────────────────────────────────────────────────────────
   function stop() {
+    if (!isActive) return;
     isActive   = false;
     isSpeaking = false;
 
-    const btn = getBtn();
-    if (btn) {
-      btn.removeEventListener('pointerdown',  onMicDown);
-      btn.removeEventListener('pointerup',    onMicUp);
-      btn.removeEventListener('pointerleave', onMicUp);
-      btn.removeEventListener('touchstart',   onMicDown);
-      btn.removeEventListener('touchend',     onMicUp);
-      btn.classList.remove('speaking');
+    // Fechar todas as conexões P2P
+    for (const [sid, pc] of Object.entries(peers)) {
+      try { pc.close(); } catch(e) {}
     }
+    peers = {};
 
-    // Parar stream do microfone
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-      try { mediaRecorder.stop(); } catch(e) {}
-    }
+    // Parar tracks de áudio (mute → silêncio imediato)
     if (localStream) {
-      localStream.getTracks().forEach(t => t.stop());
+      localStream.getTracks().forEach(t => {
+        t.enabled = false;
+        t.stop();
+      });
       localStream = null;
     }
-    if (audioContext) {
-      try { audioContext.close(); } catch(e) {}
-      audioContext = null;
+
+    // Remover listeners UI
+    const btn = getBtn();
+    if (btn) {
+      btn.classList.remove('speaking');
+      btn.removeEventListener('pointerdown',  _onMicDown);
+      btn.removeEventListener('pointerup',    _onMicUp);
+      btn.removeEventListener('pointerleave', _onMicUp);
+      btn.removeEventListener('touchstart',   _onMicDown);
+      btn.removeEventListener('touchend',     _onMicUp);
     }
 
-    // Remover listener de voz recebida
-    SocketClient.offVoiceChunk();
+    SocketClient.offVoiceSignal();
+    SocketClient.offVoiceSpeaking();
 
     const sl = getSpeakingList();
     if (sl) sl.innerHTML = '';
     const st = getStatus();
     if (st) st.textContent = '';
 
-    console.log('[Voice] Parado e limpo.');
+    console.log('[Voice] Parado e conexões fechadas.');
   }
 
-  function onMicDown(e) {
+  // ── Push-to-talk ──────────────────────────────────────────────────────────
+  function _onMicDown(e) {
     e.preventDefault();
     if (!localStream || isSpeaking) return;
     isSpeaking = true;
+
+    // Activar áudio — tracks ficam enabled
+    localStream.getAudioTracks().forEach(t => t.enabled = true);
+
     const btn = getBtn();
     if (btn) btn.classList.add('speaking');
     const st = getStatus();
     if (st) st.textContent = '🔴 A falar...';
-    startCapture();
+
+    SocketClient.emit('voice:speaking', { speaking: true });
+    if (navigator.vibrate) navigator.vibrate(40);
   }
 
-  function onMicUp(e) {
+  function _onMicUp(e) {
     if (!isSpeaking) return;
     isSpeaking = false;
+
+    // Desactivar áudio — tracks ficam disabled (sem fechar a stream)
+    if (localStream) localStream.getAudioTracks().forEach(t => t.enabled = false);
+
     const btn = getBtn();
     if (btn) btn.classList.remove('speaking');
     const st = getStatus();
-    if (st) st.textContent = '🎙 Microfone pronto';
-    stopCapture();
+    if (st) st.textContent = '🎙 Pronto';
+
+    SocketClient.emit('voice:speaking', { speaking: false });
   }
 
-  function startCapture() {
-    if (!localStream) return;
-    try {
-      mediaRecorder = new MediaRecorder(localStream, { mimeType: 'audio/webm;codecs=opus' });
-    } catch(e) {
-      try {
-        mediaRecorder = new MediaRecorder(localStream);
-      } catch(e2) {
-        console.warn('[Voice] MediaRecorder não suportado:', e2.message);
-        return;
-      }
+  // ── WebRTC peer ───────────────────────────────────────────────────────────
+  async function _createPeer(remoteSocketId, isInitiator) {
+    if (peers[remoteSocketId]) return peers[remoteSocketId];
+
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    peers[remoteSocketId] = pc;
+
+    // Adicionar track de áudio local (começa muted — enabled=false)
+    if (localStream) {
+      localStream.getAudioTracks().forEach(t => {
+        t.enabled = false; // começa silenciado até pressionar mic
+        pc.addTrack(t, localStream);
+      });
     }
 
-    mediaRecorder.ondataavailable = async (e) => {
-      if (e.data && e.data.size > 0 && isActive) {
-        const buffer = await e.data.arrayBuffer();
-        const b64    = btoa(String.fromCharCode(...new Uint8Array(buffer)));
-        SocketClient.emit('voice:chunk', { chunk: b64 });
+    // Quando receber áudio remoto → reproduzir
+    pc.ontrack = (e) => {
+      console.log('[Voice] Track recebida de', remoteSocketId);
+      const audio = new Audio();
+      audio.srcObject = e.streams[0];
+      audio.autoplay  = true;
+      audio.volume    = 1.0;
+      // Guardar referência para poder fechar depois
+      pc._remoteAudio = audio;
+      audio.play().catch(err => console.warn('[Voice] autoplay bloqueado:', err.message));
+    };
+
+    // Relay de candidatos ICE
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        SocketClient.emit('voice:signal', {
+          toSocketId: remoteSocketId,
+          signal: { type: 'candidate', candidate: e.candidate },
+        });
       }
     };
 
-    mediaRecorder.start(150); // chunks a cada 150ms para baixa latência
-  }
+    pc.onconnectionstatechange = () => {
+      console.log(`[Voice] ${remoteSocketId} — estado: ${pc.connectionState}`);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        delete peers[remoteSocketId];
+      }
+    };
 
-  function stopCapture() {
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-      try { mediaRecorder.stop(); } catch(e) {}
+    // Se iniciador → criar offer
+    if (isInitiator) {
+      try {
+        const offer = await pc.createOffer({ offerToReceiveAudio: true });
+        await pc.setLocalDescription(offer);
+        SocketClient.emit('voice:signal', {
+          toSocketId: remoteSocketId,
+          signal: { type: 'offer', sdp: pc.localDescription },
+        });
+        console.log('[Voice] Offer enviado para', remoteSocketId);
+      } catch (err) {
+        console.error('[Voice] Erro ao criar offer:', err.message);
+      }
     }
-    mediaRecorder = null;
+
+    return pc;
   }
 
-  async function playAudioChunk(b64, username) {
+  // ── Processar sinal recebido ──────────────────────────────────────────────
+  async function _onRemoteSignal({ fromSocketId, signal }) {
+    if (!isActive) return;
+
     try {
-      if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      const binary = atob(b64);
-      const bytes  = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
-      const source = audioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(audioContext.destination);
-      source.start();
-    } catch(e) {
-      // Chunk incompleto ou formato não suportado — ignorar silenciosamente
+      let pc = peers[fromSocketId];
+
+      if (signal.type === 'offer') {
+        // Receber offer → criar peer como não-iniciador → responder com answer
+        if (!pc) pc = await _createPeer(fromSocketId, false);
+        await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        SocketClient.emit('voice:signal', {
+          toSocketId: fromSocketId,
+          signal: { type: 'answer', sdp: pc.localDescription },
+        });
+        console.log('[Voice] Answer enviado para', fromSocketId);
+
+      } else if (signal.type === 'answer') {
+        if (pc) await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+
+      } else if (signal.type === 'candidate') {
+        if (pc && pc.remoteDescription) {
+          await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+        }
+      }
+    } catch (err) {
+      console.warn('[Voice] Erro ao processar sinal:', err.message);
     }
   }
 
-  function showSpeaking(username) {
+  // ── UI: pill de quem está a falar ─────────────────────────────────────────
+  function _showSpeaking(username) {
     const sl = getSpeakingList();
     if (!sl) return;
-    // Evitar duplicados
-    if (sl.querySelector(`[data-user="${username}"]`)) return;
+    if (sl.querySelector(`[data-user="${CSS.escape(username)}"]`)) return;
     const pill = document.createElement('span');
-    pill.className = 'speaking-pill';
+    pill.className  = 'speaking-pill';
     pill.dataset.user = username;
     pill.textContent = `🔊 ${username}`;
     sl.appendChild(pill);
