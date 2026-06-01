@@ -416,26 +416,34 @@ const App = (() => {
     state.players = players;
     state.phase   = 'voting';
     Canvas.setMyTurn(false);
-    buildVoteOverlay(players, timeoutSeconds);
+    buildVoteOverlay(players, timeoutSeconds || 40);
     document.getElementById('voting-overlay').classList.remove('hidden');
     if (navigator.vibrate) navigator.vibrate([150,60,150]);
+    Voice.start();
   }
 
   function onVoteUpdate({ votesMap, votesIn, totalVoters }) {
     document.getElementById('vote-count').textContent = `${votesIn}/${totalVoters} votaram`;
   }
 
-  function onVotingEnded({ impostorCaught, players }) {
+  function onVotingEnded({ impostorCaught, players, nobody }) {
+    clearInterval(state.voteTimer);
+    Voice.stop();
     document.getElementById('voting-overlay').classList.add('hidden');
     state.players = players;
     state.phase   = 'game';
     renderSidebar();
+    if (nobody) showToast('Ninguém foi eliminado — o jogo continua!', 'info');
+    // Retomar o turno actual
+    updateTurnUI();
+    Canvas.resize();
   }
 
   function onPlayerEliminated({ username }) { showToast(`${username} foi eliminado!`,'danger'); }
 
   function onGameOver(data) {
-    clearTimeout(state.voteTimer);
+    clearInterval(state.voteTimer);
+    Voice.stop();
     document.getElementById('voting-overlay').classList.add('hidden');
     showResultsScreen(data);
   }
@@ -547,11 +555,32 @@ const App = (() => {
   }
 
   function buildVoteOverlay(players, timeoutSec) {
-    const cont = document.getElementById('vote-btns');
+    const cont    = document.getElementById('vote-btns');
+    const timerEl = document.getElementById('vote-timer');
+    const barEl   = document.getElementById('vote-timer-bar');
+    const cntEl   = document.getElementById('vote-count');
+    const nobody  = document.getElementById('btn-vote-nobody');
     if (!cont) return;
+
     cont.innerHTML = '';
-    players.forEach(p => {
-      if (p.eliminated) return;
+    nobody.disabled = false;
+    nobody.classList.remove('voted');
+    let hasVoted = false;
+
+    const castVote = (targetSocketId) => {
+      if (hasVoted) return;
+      hasVoted = true;
+      clearInterval(state.voteTimer);
+      SocketClient.emit('vote:cast', { targetSocketId });
+      cont.querySelectorAll('.vote-btn').forEach(b => b.classList.add('voted-out'));
+      nobody.disabled = true;
+    };
+
+    // Candidatos
+    const activePlayers = players.filter(p => !p.eliminated);
+    activePlayers.forEach(p => {
+      const myId = SocketClient.getId();
+      if (p.socketId === myId) return; // não votar em si mesmo
       const btn = document.createElement('div');
       btn.className = 'vote-btn';
       const c = document.createElement('canvas');
@@ -562,30 +591,40 @@ const App = (() => {
       info.innerHTML = `<div class="vote-name">${p.username}</div><div class="vote-pts">${p.score ?? 0} pts</div>`;
       btn.appendChild(info);
       btn.addEventListener('click', () => {
-        clearTimeout(state.voteTimer);
-        SocketClient.emit('vote:cast', { targetSocketId: p.socketId });
-        cont.querySelectorAll('.vote-btn').forEach(b=>b.classList.add('voted-out'));
+        castVote(p.socketId);
         btn.classList.add('voted');
       });
       cont.appendChild(btn);
     });
 
-    // Countdown
+    // Botão ninguém
+    nobody.onclick = () => {
+      castVote('nobody');
+      nobody.classList.add('voted');
+      nobody.textContent = '✅ Votaste em ninguém';
+    };
+
+    // Countdown com barra animada
     let secs = timeoutSec;
-    const timerEl = document.getElementById('vote-timer');
     if (timerEl) timerEl.textContent = `⏱ ${secs}s`;
+    if (barEl)   barEl.style.width   = '100%';
+    if (cntEl)   cntEl.textContent   = `0/${activePlayers.length} votaram`;
+
     state.voteTimer = setInterval(() => {
       secs--;
+      const pct = Math.max(0, (secs / timeoutSec) * 100);
       if (timerEl) timerEl.textContent = `⏱ ${secs}s`;
-      if (secs <= 5 && navigator.vibrate) navigator.vibrate([40,20,40]);
+      if (barEl)   barEl.style.width   = pct + '%';
+      if (secs <= 5) {
+        if (barEl) barEl.style.background = 'var(--rose)';
+        if (navigator.vibrate) navigator.vibrate([40,20,40]);
+      }
       if (secs <= 0) {
         clearInterval(state.voteTimer);
-        // Auto-vote primeiro disponível se não votou
-        const first = players.find(p => !p.eliminated);
-        if (first) SocketClient.emit('vote:cast', { targetSocketId: first.socketId });
+        // Tempo esgotado sem votar → voto automático em ninguém
+        if (!hasVoted) castVote('nobody');
       }
     }, 1000);
-    document.getElementById('vote-count').textContent = `0/${players.filter(p=>!p.eliminated).length} votaram`;
   }
 
   function showResultsScreen({ impostorCaught, winner, impostorSocketId, players, totalRounds }) {
@@ -717,3 +756,180 @@ const App = (() => {
 })();
 
 window.addEventListener('DOMContentLoaded', () => App.init());
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VOICE MODULE — Conversa por voz durante a votação
+// Usa WebRTC via Simple Peer emulado com getUserMedia + Socket.io relay
+// Abordagem: áudio capturado → chunks MediaRecorder → relay via socket
+// ═══════════════════════════════════════════════════════════════════════════
+const Voice = (() => {
+  let localStream    = null;
+  let audioContext   = null;
+  let mediaRecorder  = null;
+  let isSpeaking     = false;
+  let isActive       = false;
+
+  // Elementos UI
+  const getBtn     = () => document.getElementById('btn-mic');
+  const getStatus  = () => document.getElementById('voice-status');
+  const getSpeakingList = () => document.getElementById('speaking-list');
+
+  async function start() {
+    if (isActive) return;
+    isActive = true;
+
+    // Limpar lista de quem fala
+    const sl = getSpeakingList();
+    if (sl) sl.innerHTML = '';
+
+    const btn = getBtn();
+    if (btn) {
+      btn.addEventListener('pointerdown',  onMicDown);
+      btn.addEventListener('pointerup',    onMicUp);
+      btn.addEventListener('pointerleave', onMicUp);
+      btn.addEventListener('touchstart',   onMicDown, { passive: true });
+      btn.addEventListener('touchend',     onMicUp);
+    }
+
+    // Pedir permissão de microfone
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const st = getStatus();
+      if (st) st.textContent = '🎙 Microfone pronto';
+      console.log('[Voice] Microfone obtido.');
+    } catch (err) {
+      console.warn('[Voice] Sem permissão de microfone:', err.message);
+      const st = getStatus();
+      if (st) st.textContent = '🚫 Sem microfone';
+      if (btn) btn.disabled = true;
+    }
+
+    // Ouvir áudio dos outros jogadores
+    SocketClient.onVoiceChunk((data) => {
+      if (!isActive) return;
+      playAudioChunk(data.chunk, data.username);
+      showSpeaking(data.username);
+    });
+  }
+
+  function stop() {
+    isActive   = false;
+    isSpeaking = false;
+
+    const btn = getBtn();
+    if (btn) {
+      btn.removeEventListener('pointerdown',  onMicDown);
+      btn.removeEventListener('pointerup',    onMicUp);
+      btn.removeEventListener('pointerleave', onMicUp);
+      btn.removeEventListener('touchstart',   onMicDown);
+      btn.removeEventListener('touchend',     onMicUp);
+      btn.classList.remove('speaking');
+    }
+
+    // Parar stream do microfone
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      try { mediaRecorder.stop(); } catch(e) {}
+    }
+    if (localStream) {
+      localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+    }
+    if (audioContext) {
+      try { audioContext.close(); } catch(e) {}
+      audioContext = null;
+    }
+
+    // Remover listener de voz recebida
+    SocketClient.offVoiceChunk();
+
+    const sl = getSpeakingList();
+    if (sl) sl.innerHTML = '';
+    const st = getStatus();
+    if (st) st.textContent = '';
+
+    console.log('[Voice] Parado e limpo.');
+  }
+
+  function onMicDown(e) {
+    e.preventDefault();
+    if (!localStream || isSpeaking) return;
+    isSpeaking = true;
+    const btn = getBtn();
+    if (btn) btn.classList.add('speaking');
+    const st = getStatus();
+    if (st) st.textContent = '🔴 A falar...';
+    startCapture();
+  }
+
+  function onMicUp(e) {
+    if (!isSpeaking) return;
+    isSpeaking = false;
+    const btn = getBtn();
+    if (btn) btn.classList.remove('speaking');
+    const st = getStatus();
+    if (st) st.textContent = '🎙 Microfone pronto';
+    stopCapture();
+  }
+
+  function startCapture() {
+    if (!localStream) return;
+    try {
+      mediaRecorder = new MediaRecorder(localStream, { mimeType: 'audio/webm;codecs=opus' });
+    } catch(e) {
+      try {
+        mediaRecorder = new MediaRecorder(localStream);
+      } catch(e2) {
+        console.warn('[Voice] MediaRecorder não suportado:', e2.message);
+        return;
+      }
+    }
+
+    mediaRecorder.ondataavailable = async (e) => {
+      if (e.data && e.data.size > 0 && isActive) {
+        const buffer = await e.data.arrayBuffer();
+        const b64    = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+        SocketClient.emit('voice:chunk', { chunk: b64 });
+      }
+    };
+
+    mediaRecorder.start(150); // chunks a cada 150ms para baixa latência
+  }
+
+  function stopCapture() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      try { mediaRecorder.stop(); } catch(e) {}
+    }
+    mediaRecorder = null;
+  }
+
+  async function playAudioChunk(b64, username) {
+    try {
+      if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const binary = atob(b64);
+      const bytes  = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+      source.start();
+    } catch(e) {
+      // Chunk incompleto ou formato não suportado — ignorar silenciosamente
+    }
+  }
+
+  function showSpeaking(username) {
+    const sl = getSpeakingList();
+    if (!sl) return;
+    // Evitar duplicados
+    if (sl.querySelector(`[data-user="${username}"]`)) return;
+    const pill = document.createElement('span');
+    pill.className = 'speaking-pill';
+    pill.dataset.user = username;
+    pill.textContent = `🔊 ${username}`;
+    sl.appendChild(pill);
+    setTimeout(() => pill.remove(), 2500);
+  }
+
+  return { start, stop };
+})();

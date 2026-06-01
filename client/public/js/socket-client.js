@@ -92,9 +92,19 @@ const SocketClient = (() => {
     // ── Vote ──────────────────────────────────────────────────
     socket.on('vote:update', (d) => App.onVoteUpdate(d));
 
+    // Áudio de voz recebido de outro jogador
+    socket.on('voice:chunk', (data) => {
+      if (_voiceChunkCb) _voiceChunkCb(data);
+    });
+
     // Keep-alive para Render free tier
     setInterval(() => { if (socket?.connected) socket.emit('ping:keep-alive'); }, 20000);
   }
+
+  // Listeners de voz
+  let _voiceChunkCb = null;
+  function onVoiceChunk(cb)  { _voiceChunkCb = cb; }
+  function offVoiceChunk()   { _voiceChunkCb = null; }
 
   function emit(event, data) {
     if (!socket || !socket.connected) {
@@ -109,5 +119,5 @@ const SocketClient = (() => {
   function getId()      { return socket?.id; }
   function isConnected(){ return socket?.connected ?? false; }
 
-  return { connect, emit, disconnect, getId, isConnected };
+  return { connect, emit, disconnect, getId, isConnected, onVoiceChunk, offVoiceChunk };
 })();

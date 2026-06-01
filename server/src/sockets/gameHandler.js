@@ -8,7 +8,7 @@ const { query } = require('../config/database');
 const { sanitizePlayers } = require('./roomHandler');
 const { v4: uuidv4 } = require('uuid');
 
-const VOTE_TIMEOUT    = parseInt(process.env.VOTE_TIMEOUT_SECONDS    || '25', 10) * 1000;
+const VOTE_TIMEOUT    = parseInt(process.env.VOTE_TIMEOUT_SECONDS    || '40', 10) * 1000;
 const TURN_TIMEOUT    = parseInt(process.env.TURN_TIMEOUT_SECONDS    || '30', 10) * 1000;
 
 /**
@@ -95,6 +95,23 @@ module.exports = function registerGameHandler(io, socket, activeRooms, socketRoo
     endTurn(io, socket, room, roomCode);
   });
 
+  // ─── Relay de voz (apenas durante VOTING) ─────────────────────────────────
+  socket.on('voice:chunk', ({ chunk }) => {
+    const roomCode = socketRoomMap[socket.id];
+    if (!roomCode || !activeRooms[roomCode]) return;
+    const room = activeRooms[roomCode];
+    if (room.status !== 'VOTING') return; // só relay durante votação
+
+    const player = room.players.find(p => p.socketId === socket.id);
+    if (!player) return;
+
+    // Re-transmitir para todos os outros na sala (sem o próprio)
+    socket.to(roomCode).emit('voice:chunk', {
+      chunk,
+      username: player.username,
+    });
+  });
+
   // ─── Votação ───────────────────────────────────────────────────────────────
   socket.on('vote:cast', ({ targetSocketId }) => {
     const roomCode = socketRoomMap[socket.id];
@@ -106,10 +123,11 @@ module.exports = function registerGameHandler(io, socket, activeRooms, socketRoo
     if (!voter || voter.hasVoted) return; // voto duplo bloqueado
 
     voter.hasVoted = true;
-    voter.votedFor = targetSocketId;
+    voter.votedFor = targetSocketId || 'nobody';
 
-    // Incrementar contador de votos no alvo
-    room.votesReceived[targetSocketId] = (room.votesReceived[targetSocketId] || 0) + 1;
+    // 'nobody' é um voto válido — ninguém é eliminado se for maioria
+    const voteKey = targetSocketId || 'nobody';
+    room.votesReceived[voteKey] = (room.votesReceived[voteKey] || 0) + 1;
 
     io.to(roomCode).emit('vote:update', {
       voterName:   voter.username,
@@ -201,40 +219,61 @@ function startVoting(io, room, roomCode) {
 }
 
 function resolveVote(io, room, roomCode) {
-  // Apurar o jogador mais votado
+  clearTimeout(room._voteTimer);
+
+  // Apurar o candidato mais votado
   let maxVotes = 0;
-  let eliminatedSocketId = null;
-  for (const [sid, count] of Object.entries(room.votesReceived)) {
-    if (count > maxVotes) { maxVotes = count; eliminatedSocketId = sid; }
+  let topKey = null; // socketId ou 'nobody'
+  for (const [key, count] of Object.entries(room.votesReceived)) {
+    if (count > maxVotes) { maxVotes = count; topKey = key; }
   }
 
   const impostorSocketId = room.players[room.impostorIndex]?.socketId;
-  const impostorCaught   = eliminatedSocketId === impostorSocketId;
+  const activePlayers    = room.players.filter(p => !p.eliminated);
+  const totalVotes       = activePlayers.length;
+  const nobodyVotes      = room.votesReceived['nobody'] || 0;
+  const ninguemEhMaioria = nobodyVotes > totalVotes / 2;
 
-  if (impostorCaught) {
+  // Impostor apanhado
+  if (topKey && topKey !== 'nobody' && topKey === impostorSocketId) {
     return resolveGameOver(io, room, roomCode, true);
-  } else {
-    // Jogador errado eliminado ou ninguém votou suficientemente
-    if (eliminatedSocketId) {
-      const eliminated = room.players.find(p => p.socketId === eliminatedSocketId);
-      if (eliminated) eliminated.eliminated = true;
-      io.to(roomCode).emit('game:player-eliminated', { username: eliminated?.username });
-    }
+  }
 
-    // Se restam menos de MIN_PLAYERS activos → impostor ganha
-    const activePlayers = room.players.filter(p => !p.eliminated);
-    if (activePlayers.length < MIN_PLAYERS - 1) {
-      return resolveGameOver(io, room, roomCode, false);
-    }
-
-    // Continuar jogo — resetar para nova rodada
+  // Maioria votou em ninguém → ninguém é eliminado, jogo continua
+  if (ninguemEhMaioria || topKey === 'nobody' || !topKey) {
+    console.log(`[Vote] ${roomCode} — Maioria votou em ninguém. Jogo continua.`);
     room.status = 'PLAYING';
     io.to(roomCode).emit('game:voting-ended', {
-      eliminatedSocketId,
+      eliminatedSocketId: null,
+      nobody: true,
       impostorCaught: false,
       players: sanitizePlayers(room.players),
     });
+    return;
   }
+
+  // Jogador errado eliminado
+  const eliminated = room.players.find(p => p.socketId === topKey);
+  if (eliminated) {
+    eliminated.eliminated = true;
+    io.to(roomCode).emit('game:player-eliminated', { username: eliminated.username });
+    console.log(`[Vote] ${roomCode} — ${eliminated.username} eliminado (errado).`);
+  }
+
+  // Se restam poucos jogadores activos → impostor ganha
+  const remaining = room.players.filter(p => !p.eliminated);
+  if (remaining.length < MIN_PLAYERS - 1) {
+    return resolveGameOver(io, room, roomCode, false);
+  }
+
+  // Continuar jogo
+  room.status = 'PLAYING';
+  io.to(roomCode).emit('game:voting-ended', {
+    eliminatedSocketId: topKey,
+    nobody: false,
+    impostorCaught: false,
+    players: sanitizePlayers(room.players),
+  });
 }
 
 async function resolveGameOver(io, room, roomCode, impostorCaught) {

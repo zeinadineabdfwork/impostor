@@ -173,12 +173,31 @@
       <!-- Voting Overlay -->
       <div id="voting-overlay" class="hidden">
         <div class="vote-title">🚨 Hora de Votar!</div>
-        <p class="vote-sub">Quem fez o traço suspeito? Vota antes do tempo acabar!</p>
-        <div class="vote-btns" id="vote-btns"></div>
+        <p class="vote-sub">Discutam e votem! Quem é o impostor?</p>
+
+        <!-- Barra de tempo -->
+        <div class="vote-timer-bar-wrap">
+          <div class="vote-timer-bar" id="vote-timer-bar"></div>
+        </div>
         <div class="vote-meta">
           <span id="vote-count">0/0 votaram</span>
-          <span id="vote-timer">⏱ 25s</span>
+          <span id="vote-timer">⏱ 40s</span>
         </div>
+
+        <!-- Botões de voz -->
+        <div class="voice-row">
+          <button id="btn-mic" class="btn-mic" title="Segurar para falar">🎤 Segurar para falar</button>
+          <span id="voice-status" class="voice-status"></span>
+        </div>
+
+        <!-- Quem está a falar -->
+        <div id="speaking-list" class="speaking-list"></div>
+
+        <!-- Opções de voto -->
+        <div class="vote-btns" id="vote-btns"></div>
+
+        <!-- Botão ninguém -->
+        <button class="btn-nobody" id="btn-vote-nobody">🤷 Ninguém é o impostor</button>
       </div>
     </div>
 
